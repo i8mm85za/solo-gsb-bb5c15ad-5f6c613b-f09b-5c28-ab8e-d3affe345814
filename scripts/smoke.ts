@@ -16,12 +16,13 @@ import {
   resolveReverseSegment,
 } from '../src/lib/reverseDns'
 import { buildOption121, encodeRoute, resolveClientSegment } from '../src/lib/option121'
+import { buildDhcpPool, resolvePoolSegment } from '../src/lib/dhcpPool'
 import { checkMac, normalizeMacInput } from '../src/lib/mac'
 import { buildExportJson } from '../src/lib/exporter'
 import { intToIp, ipToInt, prefixForHosts } from '../src/lib/ip'
 import { plan } from '../src/lib/planner'
 import { blocksToCidrList, summarizeSegments } from '../src/lib/summary'
-import type { HostAssignment, PlannerInput, Segment } from '../src/lib/types'
+import type { DhcpExclusionInput, HostAssignment, PlannerInput, Segment } from '../src/lib/types'
 
 let failures = 0
 function check(name: string, cond: boolean, extra = '') {
@@ -1785,6 +1786,295 @@ check('反向 DNS 不改动登记数组', (() => {
   return JSON.stringify(crossList) === snapshot
 })())
 check('导出 JSON 不含 in-addr.arpa / PTR 内容', !/in-addr\.arpa|PTR/.test(buildExportJson(hostPlan, { parentCidr: demo.parentCidr })))
+
+// ========== 21) DHCP 动态地址池（dnsmasq dhcp-range） ==========
+// 演示规划：q4=192.168.10.16/30（.16 网络 / .19 广播 / .17~.18 可用），
+// q1=192.168.10.128/25，q2=192.168.10.64/26，q3=192.168.10.32/27（固定）
+
+// 21a) resolvePoolSegment：只接受成功分配的固定 / 自动网段
+check('地址池网段解析为 q4（192.168.10.16/30）', resolvePoolSegment(hostPlan, 'q4')?.cidr === '192.168.10.16/30')
+check('固定网段 q3 也可作为地址池网段', resolvePoolSegment(hostPlan, 'q3')?.cidr === '192.168.10.32/27')
+check('保留区 / 空闲段不能作为地址池网段', resolvePoolSegment(hostPlan, 'r1') === null)
+check('空选择 / 已删除需求解析为 null', resolvePoolSegment(hostPlan, '') === null && resolvePoolSegment(hostPlan, 'nope') === null)
+
+// 21b) 无手工排除：自动扣除网络地址与广播地址，/30 剩余 .17 ~ .18 一段
+const p30 = buildDhcpPool([], segById.get('q4')!, [], hostPlan)
+check('无手工排除时无错误', p30.errors.length === 0, JSON.stringify(p30.errors))
+check(
+  '/30 自动扣除网络 .16 与广播 .19，池为 .17 ~ .18（2 个）',
+  p30.pools.length === 1 &&
+    p30.pools[0].startIp === '192.168.10.17' &&
+    p30.pools[0].endIp === '192.168.10.18' &&
+    p30.pools[0].count === 2 &&
+    p30.total === 2,
+  JSON.stringify(p30.pools),
+)
+check(
+  '配置行 dhcp-range=起始,结束,掩码（/30 掩码 255.255.255.252）',
+  p30.configText === 'dhcp-range=192.168.10.17,192.168.10.18,255.255.255.252',
+  p30.configText,
+)
+check('自动排除 2 个地址（网络+广播），手工 0', p30.autoCount === 2 && p30.manualCount === 0 && p30.excludedCount === 2)
+
+// 21c) /27 无手工排除：池为 .33 ~ .62（30 个），掩码 255.255.255.224
+const p27 = buildDhcpPool([], segById.get('q3')!, [], hostPlan)
+check(
+  '/27 自动扣除 .32 网络与 .63 广播，池为 .33 ~ .62（30 个）',
+  p27.pools.length === 1 && p27.pools[0].startIp === '192.168.10.33' && p27.pools[0].endIp === '192.168.10.62' && p27.total === 30,
+  JSON.stringify(p27.pools),
+)
+check('/27 掩码为 255.255.255.224', p27.netmask === '255.255.255.224', p27.netmask)
+check('地址守恒：排除 2 + 池 30 = 容量 32', p27.excludedCount + p27.total === p27.segmentCapacity)
+
+// 21d) 当前有效主机登记逐地址自动扣除，池被切成两段
+const poolHosts: HostAssignment[] = [
+  { id: 'p1', ownerId: 'q3', name: '服务器A', address: ipToInt('192.168.10.40'), mode: 'manual' },
+  { id: 'p2', ownerId: 'q3', name: '服务器B', address: ipToInt('192.168.10.41'), mode: 'auto' },
+]
+const p27h = buildDhcpPool([], segById.get('q3')!, poolHosts, hostPlan)
+check('自动排除明细含 2 条主机登记', p27h.autoItems.filter((x) => x.kind === 'host').length === 2)
+check(
+  '登记 .40/.41 自动扣除后切成两段：.33~.39 与 .42~.62（7 + 21 = 28）',
+  p27h.pools.length === 2 &&
+    p27h.pools[0].startIp === '192.168.10.33' && p27h.pools[0].endIp === '192.168.10.39' && p27h.pools[0].count === 7 &&
+    p27h.pools[1].startIp === '192.168.10.42' && p27h.pools[1].endIp === '192.168.10.62' && p27h.pools[1].count === 21 &&
+    p27h.total === 28,
+  JSON.stringify(p27h.pools.map((x) => [x.startIp, x.endIp, x.count])),
+)
+check(
+  '两段配置行按地址升序输出',
+  p27h.configText ===
+    'dhcp-range=192.168.10.33,192.168.10.39,255.255.255.224\n' +
+    'dhcp-range=192.168.10.42,192.168.10.62,255.255.255.224',
+  p27h.configText,
+)
+check('段序从 1 开始连续编号', p27h.pools.map((x) => x.index).join(',') === '1,2')
+
+// 21e) 失效主机登记（越界 / 网络地址 / 广播地址）不自动扣除
+const poolInvalidHosts: HostAssignment[] = [
+  { id: 'i1', ownerId: 'q3', name: '网络址', address: ipToInt('192.168.10.32'), mode: 'manual' },
+  { id: 'i2', ownerId: 'q3', name: '广播址', address: ipToInt('192.168.10.63'), mode: 'manual' },
+  { id: 'i3', ownerId: 'q4', name: '他段设备', address: ipToInt('192.168.10.17'), mode: 'auto' },
+]
+const p27invalid = buildDhcpPool([], segById.get('q3')!, poolInvalidHosts, hostPlan)
+check('失效/他段登记不进入自动扣除，池仍为完整 .33 ~ .62', p27invalid.total === 30 && p27invalid.autoItems.filter((x) => x.kind === 'host').length === 0)
+
+// 21f) 手工排除切池：/27 排除 .40 ~ .50，得 .33~.39 与 .51~.62
+const oneExcl: DhcpExclusionInput[] = [
+  { id: 'e1', start: '192.168.10.40', end: '192.168.10.50' },
+]
+const pOne = buildDhcpPool(oneExcl, segById.get('q3')!, [], hostPlan)
+check('单段手工排除无错误', pOne.errors.length === 0, JSON.stringify(pOne.errors))
+check('手工排除计数 11', pOne.manualCount === 11 && pOne.manualRanges.length === 1)
+check(
+  '手工排除 .40~.50 后池为 .33~.39（7）与 .51~.62（12），总 19',
+  pOne.pools.length === 2 && pOne.pools[0].count === 7 && pOne.pools[1].count === 12 && pOne.total === 19,
+  JSON.stringify(pOne.pools.map((x) => x.count)),
+)
+check('地址守恒：排除 13（11 手工 + 2 自动）+ 池 19 = 32', pOne.excludedCount + pOne.total === 32 && pOne.excludedCount === 13)
+
+// 21g) 重叠与相邻手工区间先合并：[.40,.45] [.44,.50] [.51,.60] -> .40~.60
+const mergeExcl: DhcpExclusionInput[] = [
+  { id: 'e1', start: '192.168.10.40', end: '192.168.10.45' },
+  { id: 'e2', start: '192.168.10.44', end: '192.168.10.50' },
+  { id: 'e3', start: '192.168.10.51', end: '192.168.10.60' },
+]
+const pMerge = buildDhcpPool(mergeExcl, segById.get('q3')!, [], hostPlan)
+check('重叠+相邻三段合并为一段 .40 ~ .60（21 个地址）',
+  pMerge.manualRanges.length === 1 &&
+    pMerge.manualRanges[0].start === ipToInt('192.168.10.40') &&
+    pMerge.manualRanges[0].end === ipToInt('192.168.10.60') &&
+    pMerge.manualCount === 21,
+  JSON.stringify(pMerge.manualRanges),
+)
+check('合并后池为 .33~.39 与 .61~.62，总 9', pMerge.total === 9 && pMerge.pools.map((x) => x.count).join(',') === '7,2')
+
+// 21h) 手工区间与自动排除重叠：排除 .32 ~ .35（含网络地址 .32）与 .60 ~ .63（含广播 .63）
+const edgeExcl: DhcpExclusionInput[] = [
+  { id: 'e1', start: '192.168.10.32', end: '192.168.10.35' },
+  { id: 'e2', start: '192.168.10.60', end: '192.168.10.63' },
+]
+const pEdge = buildDhcpPool(edgeExcl, segById.get('q3')!, [], hostPlan)
+check('手工区间允许覆盖网络/广播地址（不报错）', pEdge.errors.length === 0, JSON.stringify(pEdge.errors))
+check('手工为两段，计数 4 + 4 = 8', pEdge.manualCount === 8 && pEdge.manualRanges.length === 2)
+check(
+  '实际排除去重：手工 8 已含网络 .32 与广播 .63（自动不重复计）',
+  pEdge.autoCount === 2 && pEdge.excludedCount === 8,
+  `${pEdge.autoCount}/${pEdge.excludedCount}`,
+)
+check(
+  '池只有一段 .36 ~ .59（24 个），地址守恒 8 + 24 = 32',
+  pEdge.pools.length === 1 &&
+    pEdge.pools[0].startIp === '192.168.10.36' &&
+    pEdge.pools[0].endIp === '192.168.10.59' &&
+    pEdge.pools[0].count === 24 &&
+    pEdge.excludedCount + pEdge.total === 32,
+  JSON.stringify(pEdge.pools),
+)
+
+// 21i) 手工区间与主机登记重叠时去重，不重复计数
+const overlapHosts: HostAssignment[] = [
+  { id: 'h1', ownerId: 'q3', name: '保留主机', address: ipToInt('192.168.10.40'), mode: 'manual' },
+]
+const pOverlap = buildDhcpPool(
+  [{ id: 'e1', start: '192.168.10.40', end: '192.168.10.50' }],
+  segById.get('q3')!,
+  overlapHosts,
+  hostPlan,
+)
+check('手工区间与登记 .40 重叠：手工 11、自动 3（网络+广播+登记），并集去重 13',
+  pOverlap.manualCount === 11 && pOverlap.autoCount === 3 && pOverlap.excludedCount === 13,
+  JSON.stringify({ m: pOverlap.manualCount, a: pOverlap.autoCount, x: pOverlap.excludedCount }),
+)
+check('去重后地址守恒：13 + 19 = 32', pOverlap.excludedCount + pOverlap.total === 32 && pOverlap.total === 19)
+
+// 21j) 相邻手工区间共同把可用段切出多个池：排除 .35~.40 与 .42~.45
+const multiExcl: DhcpExclusionInput[] = [
+  { id: 'e1', start: '192.168.10.35', end: '192.168.10.40' },
+  { id: 'e2', start: '192.168.10.42', end: '192.168.10.45' },
+]
+const pMulti = buildDhcpPool(multiExcl, segById.get('q3')!, [], hostPlan)
+check(
+  '多段不相邻手工区间切出三个池：.33~.34（2）、.41（1）、.46~.62（17），总 20',
+  pMulti.pools.length === 3 &&
+    pMulti.pools.map((x) => x.count).join(',') === '2,1,17' &&
+    pMulti.total === 20,
+  JSON.stringify(pMulti.pools.map((x) => [x.startIp, x.endIp, x.count])),
+)
+
+// 21k) 单点区间（起止相同）合法，扣除一个地址
+const pSingle = buildDhcpPool(
+  [{ id: 'e1', start: '192.168.10.33', end: '192.168.10.33' }],
+  segById.get('q3')!,
+  [],
+  hostPlan,
+)
+check('单点区间合法（.33 一段、计数 1）', pSingle.errors.length === 0 && pSingle.manualCount === 1)
+check('扣除 .33 后池为 .34~.62（29）', pSingle.pools.length === 1 && pSingle.pools[0].startIp === '192.168.10.34' && pSingle.total === 29)
+
+// 21l) 全部可用地址手工排除：池为空但不报错（/30 排除 .17~.18）
+const pEmpty = buildDhcpPool(
+  [{ id: 'e1', start: '192.168.10.17', end: '192.168.10.18' }],
+  segById.get('q4')!,
+  [],
+  hostPlan,
+)
+check('全部可用地址被排除：无错误、池 0 段、配置为空串', pEmpty.errors.length === 0 && pEmpty.pools.length === 0 && pEmpty.total === 0 && pEmpty.configText === '')
+check('地址守恒：排除 4 = 容量 4', pEmpty.excludedCount === 4 && pEmpty.segmentCapacity === 4)
+
+// 21m) 错误：非法 IPv4、缺字段、起止倒置、越出网段（逐条定位、停止输出）
+check(
+  '起始地址非法报错',
+  buildDhcpPool([{ id: 'e1', start: '999.1.1.1', end: '192.168.10.40' }], segById.get('q3')!, [], hostPlan).errors.some((e) =>
+    e.index === 1 && /起始地址.*不是合法/.test(e.message),
+  ),
+)
+check(
+  '结束地址非法报错',
+  buildDhcpPool([{ id: 'e1', start: '192.168.10.40', end: 'abc' }], segById.get('q3')!, [], hostPlan).errors.some((e) =>
+    /结束地址.*不是合法/.test(e.message),
+  ),
+)
+check(
+  '缺少起始 / 结束分别报错',
+  (() => {
+    const b = buildDhcpPool(
+      [
+        { id: 'e1', start: '', end: '192.168.10.40' },
+        { id: 'e2', start: '192.168.10.40', end: '' },
+      ],
+      segById.get('q3')!,
+      [],
+      hostPlan,
+    )
+    return b.errors.length === 2 && /缺少起始地址/.test(b.errors[0].message) && /缺少结束地址/.test(b.errors[1].message)
+  })(),
+)
+check(
+  '起止倒置报错并展示两个地址',
+  /晚于结束地址/.test(
+    buildDhcpPool([{ id: 'e1', start: '192.168.10.50', end: '192.168.10.40' }], segById.get('q3')!, [], hostPlan).errors[0]?.message ?? '',
+  ),
+)
+check(
+  '区间超出网段报错（起在网段前）并显示网段边界',
+  (() => {
+    const b = buildDhcpPool([{ id: 'e1', start: '192.168.10.30', end: '192.168.10.40' }], segById.get('q3')!, [], hostPlan)
+    return b.errors.length === 1 && /超出所选网段/.test(b.errors[0].message) && /192\.168\.10\.32 ~ 192\.168\.10\.63/.test(b.errors[0].message)
+  })(),
+)
+check(
+  '区间超出网段报错（止在网段后）',
+  /超出所选网段/.test(
+    buildDhcpPool([{ id: 'e1', start: '192.168.10.60', end: '192.168.10.64' }], segById.get('q3')!, [], hostPlan).errors[0]?.message ?? '',
+  ),
+)
+const pErr = buildDhcpPool(
+  [
+    { id: 'e1', start: '192.168.10.40', end: '192.168.10.50' },
+    { id: 'e2', start: '192.168.10.60', end: '192.168.10.40' },
+  ],
+  segById.get('q3')!,
+  [],
+  hostPlan,
+)
+check('有错时停止输出：pools/configText 为空，错误定位到第 2 条', pErr.pools.length === 0 && pErr.configText === '' && pErr.errors.length === 1 && pErr.errors[0].index === 2)
+check('有错时无自身错误的行仍给出 range 预览', pErr.rows[0].range !== null && pErr.rows[1].range === null)
+check('两个空白字段的占位行跳过、不报错', buildDhcpPool([{ id: 'e1', start: '   ', end: '' }], segById.get('q3')!, [], hostPlan).rows[0].empty === true)
+
+// 21n) 实时重算：规划迁移后按新网段生成；删除需求后 resolvePoolSegment 为 null（面板暂停、录入保留）
+check('迁移后 q4=20/30，解析跟随新网段且掩码为 /30 掩码',
+  resolvePoolSegment(migratedPlan, 'q4')?.cidr === '192.168.10.20/30' &&
+    buildDhcpPool([], resolvePoolSegment(migratedPlan, 'q4')!, [], migratedPlan).netmask === '255.255.255.252',
+)
+const poolMigrated = buildDhcpPool(
+  [{ id: 'e1', start: '192.168.10.21', end: '192.168.10.21' }],
+  resolvePoolSegment(migratedPlan, 'q4')!,
+  [],
+  migratedPlan,
+)
+check('迁移后在新网段（.20~.23）内的录入合法，池扣除 .21 后为 .22（1 个）',
+  poolMigrated.errors.length === 0 &&
+    poolMigrated.pools.length === 1 &&
+    poolMigrated.pools[0].startIp === '192.168.10.22' &&
+    poolMigrated.pools[0].endIp === '192.168.10.22',
+  JSON.stringify(poolMigrated.errors),
+)
+check(
+  '原录入 .17 相对新网段 .20~.23 越界：实时重新校验报错（录入不静默改写、不丢失）',
+  buildDhcpPool(
+    [{ id: 'e1', start: '192.168.10.17', end: '192.168.10.17' }],
+    resolvePoolSegment(migratedPlan, 'q4')!,
+    [],
+    migratedPlan,
+  ).errors.length === 1,
+)
+check('需求删除后地址池网段解析为 null（结果暂停、录入由上层保留）', resolvePoolSegment(q4Deleted, 'q4') === null)
+
+// 21o) 登记变化实时重算：新增登记立刻从池中扣除，删除登记立刻归还
+const reactive = buildDhcpPool([], segById.get('q3')!, poolHosts, hostPlan)
+check('2 条登记时池总数 28', reactive.total === 28)
+const reactiveMore = buildDhcpPool(
+  [],
+  segById.get('q3')!,
+  [...poolHosts, { id: 'p3', ownerId: 'q3', name: '服务器C', address: ipToInt('192.168.10.42'), mode: 'manual' }],
+  hostPlan,
+)
+check('新增登记 .42 后池总数降到 27 且 .42 不在任何池中',
+  reactiveMore.total === 27 &&
+    reactiveMore.pools.every((p) => !(p.start <= ipToInt('192.168.10.42') && ipToInt('192.168.10.42') <= p.end)),
+)
+check('删除全部登记后池恢复为 30', buildDhcpPool([], segById.get('q3')!, [], hostPlan).total === 30)
+
+// 21p) 只读隔离：地址池计算不修改规划结果与录入数组
+{
+  const planSnapshot = JSON.stringify(hostPlan)
+  const inputSnapshot = JSON.stringify(oneExcl)
+  const hostSnapshot = JSON.stringify(poolHosts)
+  buildDhcpPool(oneExcl, segById.get('q3')!, poolHosts, hostPlan)
+  check('地址池计算不改动规划/录入/登记', JSON.stringify(hostPlan) === planSnapshot && JSON.stringify(oneExcl) === inputSnapshot && JSON.stringify(poolHosts) === hostSnapshot)
+}
+check('导出 JSON 不含 dhcp-range 内容', !/dhcp-range/.test(buildExportJson(hostPlan, { parentCidr: demo.parentCidr })))
 
 console.log(failures === 0 ? '\n全部测试通过 ✅' : `\n${failures} 个测试失败 ❌`)
 process.exit(failures === 0 ? 0 : 1)

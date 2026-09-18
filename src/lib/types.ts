@@ -256,3 +256,15 @@ export interface Option121RouteInput {
   /** 下一跳 IPv4 文本，必须是客户端网段内的可用主机地址 */
   gateway: string
 }
+
+/* ---------- DHCP 动态地址池（dnsmasq dhcp-range） ---------- */
+
+/** 一条手工排除区间录入（仅随当前会话中的输入存在，不参与规划/基线/汇总/导出） */
+export interface DhcpExclusionInput {
+  /** 行内稳定 ID，规划变化后按它原样保留录入并重新校验 */
+  id: string
+  /** 起始 IPv4 文本（含） */
+  start: string
+  /** 结束 IPv4 文本（含），须不早于起始 */
+  end: string
+}
