@@ -245,6 +245,18 @@ export interface HostAssignment {
   mac?: string
 }
 
+/* ---------- DHCP 动态地址池（dnsmasq dhcp-range） ---------- */
+
+/** 一条手工排除区间录入（仅随当前会话中的输入存在，不参与规划/基线/汇总/导出） */
+export interface DhcpExclusionInput {
+  /** 行内稳定 ID，规划变化或切换网段后按它原样保留录入并重新校验 */
+  id: string
+  /** 起始 IPv4 文本（必须位于所选网段内） */
+  start: string
+  /** 结束 IPv4 文本（留空表示仅排除起始单地址；不得小于起始） */
+  end: string
+}
+
 /* ---------- DHCP Option 121（RFC 3442 无分类静态路由） ---------- */
 
 /** 一条 Option 121 路由录入（仅随当前会话中的输入存在，不参与规划/基线/汇总/导出） */

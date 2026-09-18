@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import AddressBar from './components/AddressBar'
 import BaselinePanel from './components/BaselinePanel'
+import DhcpPoolPanel from './components/DhcpPoolPanel'
 import HostAddressPanel from './components/HostAddressPanel'
 import Option121Panel from './components/Option121Panel'
 import { ReflowSummaryBar } from './components/ReflowReport'
@@ -21,6 +22,7 @@ import { formatCidr, parseCidr } from './lib/ip'
 import { plan } from './lib/planner'
 import type {
   Baseline,
+  DhcpExclusionInput,
   HostAssignment,
   Option121RouteInput,
   RequirementInput,
@@ -60,6 +62,9 @@ export default function App() {
   const [option121Routes, setOption121Routes] = useState<Option121RouteInput[]>([])
   // 反向 DNS 区域文件：所选网段（需求稳定 ID）；登记复用主机地址分配面板数据，只读不修改
   const [reverseDnsOwnerId, setReverseDnsOwnerId] = useState('')
+  // DHCP 动态地址池：宿主网段（需求稳定 ID）+ 多段手工排除区间（行内稳定 ID，规划变化后保留并重新校验）
+  const [dhcpPoolOwnerId, setDhcpPoolOwnerId] = useState('')
+  const [dhcpPoolExclusions, setDhcpPoolExclusions] = useState<DhcpExclusionInput[]>([])
 
   // 重排生效条件：有基线、父网段为规范 CIDR 且与基线完全一致（输入非法/父网段变化时禁用）
   const parentForReflow = useMemo(() => {
@@ -126,6 +131,8 @@ export default function App() {
     setOption121ClientId('')
     setOption121Routes([])
     setReverseDnsOwnerId('')
+    setDhcpPoolOwnerId('')
+    setDhcpPoolExclusions([])
   }
 
   function clearAll() {
@@ -137,6 +144,8 @@ export default function App() {
     setOption121ClientId('')
     setOption121Routes([])
     setReverseDnsOwnerId('')
+    setDhcpPoolOwnerId('')
+    setDhcpPoolExclusions([])
   }
 
   const hasInput =
@@ -366,6 +375,15 @@ export default function App() {
         assignments={hostAssignments}
         ownerId={reverseDnsOwnerId}
         onOwnerChange={setReverseDnsOwnerId}
+      />
+
+      <DhcpPoolPanel
+        result={result}
+        assignments={hostAssignments}
+        ownerId={dhcpPoolOwnerId}
+        exclusions={dhcpPoolExclusions}
+        onOwnerChange={setDhcpPoolOwnerId}
+        onExclusionsChange={setDhcpPoolExclusions}
       />
 
       {result.segments.length > 0 && (

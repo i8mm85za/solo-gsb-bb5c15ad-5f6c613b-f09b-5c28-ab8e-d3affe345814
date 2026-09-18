@@ -1313,6 +1313,105 @@ tr.rdns-skip-row td {
 }
 
 
+/* ---------- DHCP 动态地址池 ---------- */
+
+.dhcp-pool-panel {
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.pool-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
+
+.pool-meta-row .rdns-chip strong {
+  color: #6ee7b7;
+}
+
+.pool-meta-row .rdns-chip.is-zero strong {
+  color: var(--danger);
+}
+
+.pool-row-inputs {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 22px minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .pool-row-inputs {
+    grid-template-columns: 28px 1fr 34px;
+  }
+  .pool-tilde,
+  .pool-end {
+    grid-column: 2 / 3;
+  }
+}
+
+.pool-tilde {
+  text-align: center;
+  color: var(--muted);
+}
+
+.pool-row-ok {
+  margin: 6px 0 0 40px;
+  font-size: 12px;
+  color: #6ee7b7;
+  word-break: break-all;
+}
+
+.pool-merged {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0 12px;
+  font-size: 12px;
+}
+
+.pool-merged-label {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.pool-merged-chip {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: #7dd3fc;
+}
+
+.pool-merged-chip em {
+  color: var(--muted);
+  font-style: normal;
+  margin-left: 4px;
+}
+
+.pool-host-chip {
+  color: #6ee7b7;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-table tfoot td {
+  border-top: 2px solid var(--border);
+  border-bottom: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.pool-count-cell {
+  color: #6ee7b7;
+  font-weight: 600;
+}
+
+
 /* ---------- 基线优先重排 ---------- */
 
 .reflow-toggle {
